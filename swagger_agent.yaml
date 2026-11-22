@@ -1,0 +1,187 @@
+openapi: 3.0.3
+info:
+  title: Веб-сервис агентного уровня (Вариант 9 — Упрощение сложных текстов с помощью LLM)
+  description: |
+    API сервиса агентного уровня распределённой интеллектуальной системы упрощения сложных научных и технических текстов на базе локальной языковой модели с потоковой выдачей результата.
+    
+    **Исполнитель:** Герасимович Н. И. (группа ИУ5-75Б)  
+    **Стек технологий:** Python 3.10+, FastAPI, Ollama (`Qwen2.5-3B-Instruct`)
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8000
+    description: Локальный сервер агентного уровня (FastAPI)
+
+tags:
+  - name: AgentLayer
+    description: Методы агентного уровня для взаимодействия с транспортным уровнем
+
+paths:
+  /transfer:
+    post:
+      tags:
+        - AgentLayer
+      summary: Метод Transfer — приём исходного сложного текста от транспортного уровня
+      description: |
+        Агент принимает от транспортного уровня JSON, содержащий имя отправителя (`sender`), время отправки (`sendTime`) и исходный сложный текст (`complexText`).
+        Полученный текст передается локальной языковой модели `Qwen2.5-3B-Instruct` (через Ollama) в качестве запроса на упрощение.
+        По мере генерации формируются части ответа по 2–3 предложения, разбиваются на сегменты до 1000 байт и передаются на транспортный уровень методом `Send`.
+      operationId: transferComplexText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+      responses:
+        '200':
+          description: Запрос успешно принят, запущена потоковая генерация и отправка сегментов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Ошибка валидации входного JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Ошибка при обращении к локальной языковой модели Ollama
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /send:
+    post:
+      tags:
+        - AgentLayer
+      summary: Метод Send — последовательная передача сегментов результата на транспортный уровень
+      description: |
+        Метод инкапсулирует отправку одного сегмента (размером не более 1000 байт) сгенерированной части ответа на транспортный уровень.
+        Каждый сегмент содержит время отправки в качестве идентификатора сообщения (`sendTime`), общее количество сегментов (`totalSegments`), номер текущего сегмента (`segmentNumber`) и полезную нагрузку (`payload`).
+        В качестве полезной нагрузки передается сериализованный JSON объекта `SimplifiedPartMessage` (или его фрагмент, если размер превысил 1000 байт).
+      operationId: sendSegmentToTransport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SegmentRequest'
+      responses:
+        '200':
+          description: Сегмент успешно доставлен на транспортный уровень
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Некорректный формат сегмента
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    TransferRequest:
+      type: object
+      description: Входное сообщение от транспортного уровня с исходным сложным текстом
+      required:
+        - sender
+        - sendTime
+        - complexText
+      properties:
+        sender:
+          type: string
+          description: Имя пользователя (отправителя запроса)
+          example: "Иван"
+        sendTime:
+          type: string
+          description: Время отправки исходного запроса (используется как идентификатор исходного запроса)
+          example: "14:25:10"
+        complexText:
+          type: string
+          description: Исходный сложный научный или технический текст для упрощения
+          example: "Энтропия термодинамической системы в изолированном состоянии не убывает, что определяет необратимость макроскопических процессов во времени согласно второму началу термодинамики."
+
+    SimplifiedPartMessage:
+      type: object
+      description: |
+        Структура отдельного JSON-сообщения готовой части ответа от языковой модели (2–3 предложения).
+        Именно эта структура упаковывается в строку и разбивается на сегменты до 1000 байт в поле `payload` схемы `SegmentRequest`.
+      required:
+        - sender
+        - requestId
+        - partNumber
+        - simplifiedText
+        - isFinal
+      properties:
+        sender:
+          type: string
+          description: Имя отправителя исходного запроса
+          example: "Иван"
+        requestId:
+          type: string
+          description: Идентификатор исходного запроса (совпадает с sendTime из TransferRequest)
+          example: "14:25:10"
+        partNumber:
+          type: integer
+          minimum: 1
+          description: Порядковый номер сгенерированной части ответа
+          example: 1
+        simplifiedText:
+          type: string
+          description: Упрощённый текст части ответа (2–3 предложения) или пустая строка для финального маркера окончания генерации
+          example: "В любой закрытой системе беспорядок со временем только растёт. Из-за этого многие физические процессы идут только в одну сторону, например, горячий чай сам остывает, но никогда сам не нагревается от комнаты."
+        isFinal:
+          type: boolean
+          description: Признак завершения ответа (true — генерация окончена, это последнее сообщение)
+          example: false
+
+    SegmentRequest:
+      type: object
+      description: Пакет сегмента (размером не более 1000 байт), передаваемый методом Send на транспортный уровень
+      required:
+        - sendTime
+        - totalSegments
+        - segmentNumber
+        - payload
+      properties:
+        sendTime:
+          type: string
+          description: Время отправки части ответа (идентификатор сообщения для сборки сегментов в очереди на транспортном уровне)
+          example: "14:25:12"
+        totalSegments:
+          type: integer
+          minimum: 1
+          description: Общее количество сегментов, на которые разбита текущая часть ответа
+          example: 1
+        segmentNumber:
+          type: integer
+          minimum: 1
+          description: Номер текущего сегмента (от 1 до totalSegments)
+          example: 1
+        payload:
+          type: string
+          maxLength: 1000
+          description: Полезная нагрузка сегмента (размером не более 1000 байт) — фрагмент JSON-строки SimplifiedPartMessage
+          example: "{\"sender\":\"Иван\",\"requestId\":\"14:25:10\",\"partNumber\":1,\"simplifiedText\":\"В любой закрытой системе беспорядок со временем только растёт...\",\"isFinal\":false}"
+
+    StatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Ошибка обработки запроса"
